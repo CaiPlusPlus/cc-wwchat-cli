@@ -7,7 +7,7 @@ import { logger } from '../utils/logger.js';
 
 export async function createServer(): Promise<McpServer> {
   const config = loadConfig();
-  const client = new OpenClawClient(config.openclawHost, config.openclawPort);
+  const client = new OpenClawClient();
 
   const server = new McpServer({
     name: 'cc-wechat-cli',

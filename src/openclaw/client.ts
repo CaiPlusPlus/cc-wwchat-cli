@@ -1,126 +1,144 @@
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { logger } from '../utils/logger.js';
-import type {
-  OpenClawMessage,
-  OpenClawContact,
-  OpenClawGroup,
-  OpenClawSendRequest,
-  OpenClawSendResponse,
-  OpenClawStatus,
-  OpenClawLoginResponse,
-} from './types.js';
 
-const WECHAT_CHANNEL_ID = 'openclaw-weixin';
+const execAsync = promisify(exec);
+
+const WECHAT_CHANNEL = 'openclaw-weixin';
+
+export interface OpenClawMessage {
+  id: string;
+  from: string;
+  to: string;
+  content: string;
+  type: 'text' | 'image' | 'file' | 'video';
+  timestamp: number;
+  contextToken?: string;
+}
+
+export interface OpenClawContact {
+  id: string;
+  name: string;
+}
+
+export interface OpenClawGroup {
+  id: string;
+  name: string;
+  memberCount: number;
+}
+
+export interface AgentResponse {
+  success: boolean;
+  content?: string;
+  error?: string;
+}
 
 export class OpenClawClient {
-  private baseUrl: string;
-  private timeout: number;
+  private openclawPath: string;
 
-  constructor(host: string = 'localhost', port: number = 3100) {
-    this.baseUrl = `http://${host}:${port}`;
-    this.timeout = 30000;
+  constructor() {
+    this.openclawPath = 'openclaw';
   }
 
-  private async request<T>(
-    path: string,
-    options: RequestInit = {}
-  ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-    logger.debug(`Request: ${options.method || 'GET'} ${url}`);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+  private async runOpenclaw(args: string[], timeout: number = 60000): Promise<string> {
+    const cmd = `${this.openclawPath} ${args.join(' ')}`;
+    logger.debug(`Running: ${cmd}`);
 
     try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
+      const { stdout, stderr } = await execAsync(cmd, {
+        timeout,
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
       });
 
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`OpenClaw API error: ${response.status} - ${error}`);
+      if (stderr && !stdout) {
+        throw new Error(stderr);
       }
 
-      return response.json() as Promise<T>;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request timeout');
+      return stdout;
+    } catch (error: unknown) {
+      const err = error as { killed?: boolean; signal?: string; message?: string };
+      if (err.killed && err.signal === 'SIGTERM') {
+        throw new Error('Command timeout');
       }
       throw error;
     }
   }
 
-  // Check gateway status
-  async getStatus(): Promise<OpenClawStatus> {
-    return this.request<OpenClawStatus>('/api/status');
-  }
-
-  // Check if OpenClaw is running
-  async isRunning(): Promise<boolean> {
+  /**
+   * Check if OpenClaw is installed and available
+   */
+  async isAvailable(): Promise<boolean> {
     try {
-      await this.getStatus();
+      await this.runOpenclaw(['--version']);
       return true;
     } catch {
       return false;
     }
   }
 
-  // Check if WeChat channel is available
-  async isWeChatAvailable(): Promise<boolean> {
+  /**
+   * Check if gateway is running
+   */
+  async isGatewayRunning(): Promise<boolean> {
     try {
-      const status = await this.getStatus();
-      return status.channels.some(c => c.id === WECHAT_CHANNEL_ID);
+      const result = await this.runOpenclaw(['gateway', 'health']);
+      return result.includes('OK');
     } catch {
       return false;
     }
   }
 
-  // Initiate WeChat login
-  async login(): Promise<OpenClawLoginResponse> {
+  /**
+   * Check if WeChat channel is configured
+   */
+  async isWeChatConfigured(): Promise<boolean> {
     try {
-      const response = await this.request<OpenClawLoginResponse>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/login`,
-        { method: 'POST' }
-      );
-      return response;
-    } catch (error) {
-      logger.error('Login failed:', error);
-      return {
-        success: false,
-        message: error instanceof Error ? error.message : 'Unknown error',
-      };
-    }
-  }
-
-  // Get login QR code
-  async getLoginQRCode(): Promise<string | null> {
-    try {
-      const response = await this.request<{ qrCode: string }>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/qrcode`
-      );
-      return response.qrCode;
+      const result = await this.runOpenclaw(['channels', 'list']);
+      return result.includes(WECHAT_CHANNEL);
     } catch {
-      return null;
+      return false;
     }
   }
 
-  // Send message
-  async sendMessage(request: OpenClawSendRequest): Promise<OpenClawSendResponse> {
+  /**
+   * Get gateway status
+   */
+  async getStatus(): Promise<string> {
     try {
-      return await this.request<OpenClawSendResponse>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/send`,
-        {
-          method: 'POST',
-          body: JSON.stringify(request),
-        }
-      );
+      return await this.runOpenclaw(['status']);
+    } catch (error) {
+      logger.error('Failed to get status:', error);
+      return 'Error getting status';
+    }
+  }
+
+  /**
+   * Send a message through the AI agent (with delivery to channel)
+   * This goes through OpenClaw's agent system
+   */
+  async sendMessage(
+    to: string,
+    message: string,
+    deliver: boolean = true
+  ): Promise<AgentResponse> {
+    try {
+      const args = [
+        'agent',
+        '--channel', WECHAT_CHANNEL,
+        '--to', to,
+        '--message', `"${message.replace(/"/g, '\\"')}"`,
+      ];
+
+      if (deliver) {
+        args.push('--deliver');
+      }
+
+      const result = await this.runOpenclaw(args, 120000);
+
+      return {
+        success: true,
+        content: result,
+      };
     } catch (error) {
       return {
         success: false,
@@ -129,72 +147,32 @@ export class OpenClawClient {
     }
   }
 
-  // Get messages (poll)
-  async getMessages(since?: number, limit: number = 50): Promise<OpenClawMessage[]> {
-    const params = new URLSearchParams();
-    if (since) params.set('since', since.toString());
-    params.set('limit', limit.toString());
-
-    try {
-      return await this.request<OpenClawMessage[]>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/messages?${params}`
-      );
-    } catch (error) {
-      logger.error('Failed to get messages:', error);
-      return [];
-    }
+  /**
+   * Send a direct message (bypassing AI agent)
+   * Note: OpenClaw doesn't have a direct send command, messages go through agent
+   */
+  async sendDirectMessage(
+    to: string,
+    message: string
+  ): Promise<AgentResponse> {
+    // OpenClaw routes all messages through the agent
+    // Use --deliver to send the response back to the channel
+    return this.sendMessage(to, message, true);
   }
 
-  // Get contacts
-  async getContacts(filter?: string): Promise<OpenClawContact[]> {
-    const params = filter ? `?filter=${encodeURIComponent(filter)}` : '';
+  /**
+   * Trigger WeChat login
+   */
+  async login(): Promise<AgentResponse> {
     try {
-      return await this.request<OpenClawContact[]>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/contacts${params}`
-      );
-    } catch (error) {
-      logger.error('Failed to get contacts:', error);
-      return [];
-    }
-  }
+      const result = await this.runOpenclaw([
+        'channels', 'login', '--channel', WECHAT_CHANNEL
+      ], 180000); // 3 minute timeout for QR scan
 
-  // Get groups
-  async getGroups(): Promise<OpenClawGroup[]> {
-    try {
-      return await this.request<OpenClawGroup[]>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/groups`
-      );
-    } catch (error) {
-      logger.error('Failed to get groups:', error);
-      return [];
-    }
-  }
-
-  // Get group members
-  async getGroupMembers(groupId: string): Promise<OpenClawContact[]> {
-    try {
-      return await this.request<OpenClawContact[]>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/groups/${groupId}/members`
-      );
-    } catch (error) {
-      logger.error('Failed to get group members:', error);
-      return [];
-    }
-  }
-
-  // Send image
-  async sendImage(recipientId: string, imagePath: string): Promise<OpenClawSendResponse> {
-    try {
-      return await this.request<OpenClawSendResponse>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/send/image`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            recipientId,
-            imagePath,
-          }),
-        }
-      );
+      return {
+        success: true,
+        content: result,
+      };
     } catch (error) {
       return {
         success: false,
@@ -203,25 +181,44 @@ export class OpenClawClient {
     }
   }
 
-  // Send file
-  async sendFile(recipientId: string, filePath: string, filename?: string): Promise<OpenClawSendResponse> {
+  /**
+   * Restart the gateway
+   */
+  async restartGateway(): Promise<AgentResponse> {
     try {
-      return await this.request<OpenClawSendResponse>(
-        `/api/channels/${WECHAT_CHANNEL_ID}/send/file`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            recipientId,
-            filePath,
-            filename,
-          }),
-        }
-      );
+      const result = await this.runOpenclaw(['gateway', 'restart']);
+      return {
+        success: true,
+        content: result,
+      };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
+    }
+  }
+
+  /**
+   * Get channel status
+   */
+  async getChannelStatus(): Promise<string> {
+    try {
+      return await this.runOpenclaw(['channels', 'status', '--channel', WECHAT_CHANNEL]);
+    } catch (error) {
+      logger.error('Failed to get channel status:', error);
+      return 'Error getting channel status';
+    }
+  }
+
+  /**
+   * Open the OpenClaw dashboard
+   */
+  async openDashboard(): Promise<void> {
+    try {
+      await this.runOpenclaw(['dashboard']);
+    } catch (error) {
+      logger.error('Failed to open dashboard:', error);
     }
   }
 }

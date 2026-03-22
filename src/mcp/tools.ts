@@ -1,69 +1,64 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { OpenClawClient } from '../openclaw/client.js';
-import {
-  createMessageCache,
-  addMessage,
-  getNewMessages,
-  fromOpenClawMessage,
-} from '../wechat/message.js';
-import {
-  fromOpenClawContact,
-  fromOpenClawGroup,
-} from '../wechat/contact.js';
 import { logger } from '../utils/logger.js';
 import type { WeChatConfig } from '../utils/config.js';
-import qrcode from 'qrcode-terminal';
 
 export function registerTools(
   server: McpServer,
   client: OpenClawClient,
   config: WeChatConfig
 ): void {
-  const messageCache = createMessageCache(config.messageCacheSize);
-  let lastPollTimestamp = 0;
-
   // Configure connection
   server.tool(
     'wechat_configure',
-    'Configure WeChat connection settings',
-    {
-      host: z.string().optional().describe('OpenClaw host (default: localhost)'),
-      port: z.number().optional().describe('OpenClaw port (default: 3100)'),
-    },
-    async ({ host, port }) => {
+    'Configure and verify WeChat connection with OpenClaw',
+    {},
+    async () => {
       try {
-        const isRunning = await client.isRunning();
-        if (!isRunning) {
+        const isAvailable = await client.isAvailable();
+        if (!isAvailable) {
           return {
             content: [{
               type: 'text' as const,
-              text: '❌ OpenClaw gateway is not running. Please start OpenClaw first:\n\n```bash\nopenclaw gateway start\n```',
+              text: '❌ OpenClaw is not installed. Please install it first:\n\n```bash\nnpm install -g openclaw\n```',
             }],
           };
         }
 
-        const wechatAvailable = await client.isWeChatAvailable();
-        if (!wechatAvailable) {
+        const isGatewayRunning = await client.isGatewayRunning();
+        if (!isGatewayRunning) {
           return {
             content: [{
               type: 'text' as const,
-              text: '❌ WeChat channel is not available. Please install it first:\n\n```bash\nnpx @tencent-weixin/openclaw-weixin-cli install\n```',
+              text: '❌ OpenClaw gateway is not running. Please start it:\n\n```bash\nopenclaw gateway start\n```',
             }],
           };
         }
+
+        const isWeChatConfigured = await client.isWeChatConfigured();
+        if (!isWeChatConfigured) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: '❌ WeChat channel is not configured. Please install it:\n\n```bash\nnpx -y @tencent-weixin/openclaw-weixin-cli install\n```',
+            }],
+          };
+        }
+
+        const status = await client.getStatus();
 
         return {
           content: [{
             type: 'text' as const,
-            text: `✅ OpenClaw connection successful!\n\n- Host: ${host || config.openclawHost}\n- Port: ${port || config.openclawPort}\n- WeChat channel: Available`,
+            text: `✅ OpenClaw + WeChat connection verified!\n\n\`\`\`\n${status}\n\`\`\``,
           }],
         };
       } catch (error) {
         return {
           content: [{
             type: 'text' as const,
-            text: `❌ Configuration failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            text: `❌ Configuration check failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
           }],
         };
       }
@@ -73,31 +68,27 @@ export function registerTools(
   // Login to WeChat
   server.tool(
     'wechat_login',
-    'Initiate WeChat login with QR code',
+    'Initiate WeChat login with QR code (requires terminal access)',
     {},
     async () => {
       try {
-        const isRunning = await client.isRunning();
-        if (!isRunning) {
+        const isAvailable = await client.isAvailable();
+        if (!isAvailable) {
           return {
             content: [{
               type: 'text' as const,
-              text: '❌ OpenClaw gateway is not running. Please start it first.',
+              text: '❌ OpenClaw is not installed.',
             }],
           };
         }
 
-        const response = await client.login();
+        const result = await client.login();
 
-        if (response.qrCode) {
-          // Display QR code in terminal
-          logger.info('Scan the QR code below to login:');
-          qrcode.generate(response.qrCode, { small: true });
-
+        if (result.success) {
           return {
             content: [{
               type: 'text' as const,
-              text: '📱 QR code displayed in terminal. Please scan with WeChat to login.',
+              text: `📱 WeChat login initiated.\n\nPlease scan the QR code in the terminal where OpenClaw is running.\n\nAfter successful login, restart the gateway:\n\`\`\`bash\nopenclaw gateway restart\n\`\`\``,
             }],
           };
         }
@@ -105,9 +96,7 @@ export function registerTools(
         return {
           content: [{
             type: 'text' as const,
-            text: response.success
-              ? '✅ Already logged in or login initiated.'
-              : `❌ Login failed: ${response.message || 'Unknown error'}`,
+            text: `❌ Login failed: ${result.error}`,
           }],
         };
       } catch (error) {
@@ -124,25 +113,20 @@ export function registerTools(
   // Send message
   server.tool(
     'wechat_send',
-    'Send text message to a WeChat contact or group',
+    'Send a message to a WeChat contact via OpenClaw agent',
     {
-      to: z.string().describe('Recipient ID (user ID or group ID)'),
-      message: z.string().describe('Text message to send'),
+      to: z.string().describe('Recipient ID (e.g., "filehelper" for file transfer helper, or user ID)'),
+      message: z.string().describe('Message content to send'),
     },
     async ({ to, message }) => {
       try {
-        const result = await client.sendMessage({
-          channelId: 'openclaw-weixin',
-          recipientId: to,
-          content: message,
-          contentType: 'text',
-        });
+        const result = await client.sendMessage(to, message, true);
 
         if (result.success) {
           return {
             content: [{
               type: 'text' as const,
-              text: `✅ Message sent successfully!\n\nTo: ${to}\nMessage: ${message}\nMessage ID: ${result.messageId}`,
+              text: `✅ Message sent to ${to}!\n\nResponse:\n${result.content?.slice(0, 500) || 'No response'}`,
             }],
           };
         }
@@ -164,253 +148,152 @@ export function registerTools(
     }
   );
 
-  // Receive messages
+  // Get status
   server.tool(
-    'wechat_receive',
-    'Poll for new WeChat messages',
-    {
-      timeout: z.number().optional().default(30).describe('Max wait time in seconds'),
-    },
-    async ({ timeout }) => {
-      try {
-        const messages = await client.getMessages(lastPollTimestamp);
-
-        if (messages.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: '📭 No new messages.',
-            }],
-          };
-        }
-
-        // Update last poll timestamp and cache messages
-        const wechatMessages = messages.map(fromOpenClawMessage);
-        wechatMessages.forEach(msg => addMessage(messageCache, msg));
-        lastPollTimestamp = Math.max(...messages.map(m => m.timestamp));
-
-        const formattedMessages = wechatMessages.map(msg => {
-          const from = msg.senderName ? `${msg.senderName} (${msg.from})` : msg.from;
-          const group = msg.groupId ? ` [Group: ${msg.groupId}]` : '';
-          return `📨 **${from}**${group}\n   ${msg.content}\n   _${new Date(msg.timestamp).toLocaleString()}_`;
-        }).join('\n\n');
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `📬 ${wechatMessages.length} new message(s):\n\n${formattedMessages}`,
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Receive error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          }],
-        };
-      }
-    }
-  );
-
-  // Send image
-  server.tool(
-    'wechat_send_image',
-    'Send image to a WeChat contact or group',
-    {
-      to: z.string().describe('Recipient ID'),
-      image_path: z.string().describe('Local file path or URL to the image'),
-    },
-    async ({ to, image_path }) => {
-      try {
-        const result = await client.sendImage(to, image_path);
-
-        if (result.success) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `✅ Image sent successfully to ${to}!\nImage: ${image_path}`,
-            }],
-          };
-        }
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Failed to send image: ${result.error}`,
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Send image error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          }],
-        };
-      }
-    }
-  );
-
-  // Send file
-  server.tool(
-    'wechat_send_file',
-    'Send file to a WeChat contact or group',
-    {
-      to: z.string().describe('Recipient ID'),
-      file_path: z.string().describe('Local file path'),
-      filename: z.string().optional().describe('Display filename'),
-    },
-    async ({ to, file_path, filename }) => {
-      try {
-        const result = await client.sendFile(to, file_path, filename);
-
-        if (result.success) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `✅ File sent successfully to ${to}!\nFile: ${filename || file_path}`,
-            }],
-          };
-        }
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Failed to send file: ${result.error}`,
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Send file error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          }],
-        };
-      }
-    }
-  );
-
-  // List contacts
-  server.tool(
-    'wechat_list_contacts',
-    'List WeChat contacts',
-    {
-      filter: z.string().optional().describe('Filter contacts by name'),
-    },
-    async ({ filter }) => {
-      try {
-        const contacts = await client.getContacts(filter);
-        const wechatContacts = contacts.map(fromOpenClawContact);
-
-        if (wechatContacts.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: '📋 No contacts found.',
-            }],
-          };
-        }
-
-        const formattedContacts = wechatContacts
-          .filter(c => c.type === 'user')
-          .map(c => `- **${c.name}** (${c.id})`)
-          .join('\n');
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `📋 **Contacts** (${wechatContacts.filter(c => c.type === 'user').length}):\n\n${formattedContacts}`,
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ List contacts error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          }],
-        };
-      }
-    }
-  );
-
-  // List groups
-  server.tool(
-    'wechat_list_groups',
-    'List WeChat groups',
+    'wechat_status',
+    'Get current WeChat channel and gateway status',
     {},
     async () => {
       try {
-        const groups = await client.getGroups();
-        const wechatGroups = groups.map(fromOpenClawGroup);
-
-        if (wechatGroups.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: '📋 No groups found.',
-            }],
-          };
-        }
-
-        const formattedGroups = wechatGroups
-          .map(g => `- **${g.name}** (${g.memberCount} members) - ID: ${g.id}`)
-          .join('\n');
+        const status = await client.getStatus();
+        const channelStatus = await client.getChannelStatus();
 
         return {
           content: [{
             type: 'text' as const,
-            text: `📋 **Groups** (${wechatGroups.length}):\n\n${formattedGroups}`,
+            text: `📊 **OpenClaw Status**\n\n${status}\n\n**Channel Status:**\n${channelStatus}`,
           }],
         };
       } catch (error) {
         return {
           content: [{
             type: 'text' as const,
-            text: `❌ List groups error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            text: `❌ Status error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           }],
         };
       }
     }
   );
 
-  // Get group members
+  // Restart gateway
   server.tool(
-    'wechat_group_members',
-    'Get members of a specific WeChat group',
-    {
-      group_id: z.string().describe('Group ID'),
-    },
-    async ({ group_id }) => {
+    'wechat_restart',
+    'Restart the OpenClaw gateway',
+    {},
+    async () => {
       try {
-        const members = await client.getGroupMembers(group_id);
-        const wechatMembers = members.map(fromOpenClawContact);
+        const result = await client.restartGateway();
 
-        if (wechatMembers.length === 0) {
+        if (result.success) {
           return {
             content: [{
               type: 'text' as const,
-              text: '📋 No members found or group not accessible.',
+              text: `✅ Gateway restarted successfully!`,
             }],
           };
         }
 
-        const formattedMembers = wechatMembers
-          .map(m => `- **${m.name}** (${m.id})`)
-          .join('\n');
-
         return {
           content: [{
             type: 'text' as const,
-            text: `👥 **Group Members** (${wechatMembers.length}):\n\n${formattedMembers}`,
+            text: `❌ Failed to restart gateway: ${result.error}`,
           }],
         };
       } catch (error) {
         return {
           content: [{
             type: 'text' as const,
-            text: `❌ Get group members error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            text: `❌ Restart error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           }],
         };
       }
+    }
+  );
+
+  // Open dashboard
+  server.tool(
+    'wechat_dashboard',
+    'Open the OpenClaw web dashboard in browser',
+    {},
+    async () => {
+      try {
+        await client.openDashboard();
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `🌐 Opening OpenClaw dashboard in your browser...\n\nURL: http://127.0.0.1:18789/`,
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `❌ Failed to open dashboard: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          }],
+        };
+      }
+    }
+  );
+
+  // Help / guide
+  server.tool(
+    'wechat_help',
+    'Show usage guide for WeChat integration',
+    {},
+    async () => {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `📖 **cc-wechat-cli 使用指南**
+
+## 前置条件
+
+1. **安装 OpenClaw**
+   \`\`\`bash
+   npm install -g openclaw
+   \`\`\`
+
+2. **安装微信插件**
+   \`\`\`bash
+   npx -y @tencent-weixin/openclaw-weixin-cli install
+   \`\`\`
+
+3. **登录微信**
+   \`\`\`bash
+   openclaw channels login --channel openclaw-weixin
+   \`\`\`
+   扫描终端中的二维码登录
+
+4. **启动网关**
+   \`\`\`bash
+   openclaw gateway start
+   \`\`\`
+
+## 可用工具
+
+| 工具 | 功能 |
+|------|------|
+| wechat_configure | 验证连接状态 |
+| wechat_login | 发起微信登录 |
+| wechat_send | 发送消息 |
+| wechat_status | 查看状态 |
+| wechat_restart | 重启网关 |
+| wechat_dashboard | 打开 Web 控制台 |
+
+## 注意事项
+
+- 消息通过 OpenClaw 的 AI Agent 发送
+- 收到的消息会由 AI 处理后回复
+- 如需直接收发消息，需要访问 OpenClaw 的 WebSocket API
+
+## 故障排除
+
+1. **网关未运行**: \`openclaw gateway start\`
+2. **微信未登录**: \`openclaw channels login --channel openclaw-weixin\`
+3. **查看日志**: \`openclaw logs\`
+`,
+        }],
+      };
     }
   );
 
