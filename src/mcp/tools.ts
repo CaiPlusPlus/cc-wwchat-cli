@@ -1,14 +1,25 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { OpenClawClient } from '../openclaw/client.js';
+import { WeixinApiClient } from '../weixin/api.js';
 import { logger } from '../utils/logger.js';
 import type { WeChatConfig } from '../utils/config.js';
 
 export function registerTools(
   server: McpServer,
-  client: OpenClawClient,
+  openclawClient: OpenClawClient,
   config: WeChatConfig
 ): void {
+  // Weixin API client (lazy loaded)
+  let weixinClient: WeixinApiClient | null = null;
+
+  async function getWeixinClient(): Promise<WeixinApiClient> {
+    if (!weixinClient) {
+      weixinClient = await WeixinApiClient.fromOpenClawConfig();
+    }
+    return weixinClient;
+  }
+
   // Configure connection
   server.tool(
     'wechat_configure',
@@ -16,7 +27,7 @@ export function registerTools(
     {},
     async () => {
       try {
-        const isAvailable = await client.isAvailable();
+        const isAvailable = await openclawClient.isAvailable();
         if (!isAvailable) {
           return {
             content: [{
@@ -26,7 +37,7 @@ export function registerTools(
           };
         }
 
-        const isGatewayRunning = await client.isGatewayRunning();
+        const isGatewayRunning = await openclawClient.isGatewayRunning();
         if (!isGatewayRunning) {
           return {
             content: [{
@@ -36,7 +47,7 @@ export function registerTools(
           };
         }
 
-        const isWeChatConfigured = await client.isWeChatConfigured();
+        const isWeChatConfigured = await openclawClient.isWeChatConfigured();
         if (!isWeChatConfigured) {
           return {
             content: [{
@@ -46,12 +57,22 @@ export function registerTools(
           };
         }
 
-        const status = await client.getStatus();
+        // Try to load WeChat API client
+        let accountInfo = '';
+        try {
+          const client = await getWeixinClient();
+          const info = client.getAccountInfo();
+          accountInfo = `\n\n**WeChat Account**: ${info.accountId}`;
+        } catch (e) {
+          accountInfo = `\n\n⚠️ Direct API access unavailable: ${e instanceof Error ? e.message : 'Unknown error'}`;
+        }
+
+        const status = await openclawClient.getStatus();
 
         return {
           content: [{
             type: 'text' as const,
-            text: `✅ OpenClaw + WeChat connection verified!\n\n\`\`\`\n${status}\n\`\`\``,
+            text: `✅ OpenClaw + WeChat connection verified!${accountInfo}\n\n\`\`\`\n${status}\n\`\`\``,
           }],
         };
       } catch (error) {
@@ -72,7 +93,7 @@ export function registerTools(
     {},
     async () => {
       try {
-        const isAvailable = await client.isAvailable();
+        const isAvailable = await openclawClient.isAvailable();
         if (!isAvailable) {
           return {
             content: [{
@@ -82,7 +103,7 @@ export function registerTools(
           };
         }
 
-        const result = await client.login();
+        const result = await openclawClient.login();
 
         if (result.success) {
           return {
@@ -110,23 +131,126 @@ export function registerTools(
     }
   );
 
-  // Send message
+  // Send message (direct API - no AI processing)
   server.tool(
-    'wechat_send',
-    'Send a message to a WeChat contact via OpenClaw agent',
+    'wechat_send_direct',
+    'Send a message directly via WeChat iLink API (bypasses AI agent)',
     {
-      to: z.string().describe('Recipient ID (e.g., "filehelper" for file transfer helper, or user ID)'),
+      to: z.string().describe('Recipient user ID (e.g., from_user_id from received message, filehelper for file transfer)'),
       message: z.string().describe('Message content to send'),
+      context_token: z.string().optional().describe('Context token from received message (for replies)'),
+    },
+    async ({ to, message, context_token }) => {
+      try {
+        const client = await getWeixinClient();
+        const success = await client.sendTextMessage(to, message, context_token);
+
+        if (success) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `✅ Message sent directly to ${to}!`,
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `❌ Failed to send message`,
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `❌ Send error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          }],
+        };
+      }
+    }
+  );
+
+  // Receive messages (direct API)
+  server.tool(
+    'wechat_receive',
+    'Poll for new WeChat messages directly via iLink API',
+    {
+      timeout: z.number().optional().default(5).describe('Poll timeout in seconds'),
+    },
+    async ({ timeout }) => {
+      try {
+        const client = await getWeixinClient();
+        const response = await client.getUpdates(timeout * 1000);
+
+        if (!response.msgs || response.msgs.length === 0) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: '📭 No new messages.',
+            }],
+          };
+        }
+
+        const formattedMessages = response.msgs.map(msg => {
+          const from = msg.from_user_id || 'unknown';
+          const time = msg.create_time_ms ? new Date(msg.create_time_ms).toLocaleString() : 'unknown time';
+          let content = '';
+
+          if (msg.item_list) {
+            for (const item of msg.item_list) {
+              if (item.text_item?.text) {
+                content = item.text_item.text;
+              } else if (item.image_item) {
+                content = '[图片/Image]';
+              } else if (item.voice_item) {
+                content = `[语音/Voice ${item.voice_item.playtime || 0}s]`;
+              } else if (item.file_item) {
+                content = `[文件/File: ${item.file_item.file_name || 'unknown'}]`;
+              } else if (item.video_item) {
+                content = '[视频/Video]';
+              }
+            }
+          }
+
+          const contextInfo = msg.context_token ? `\n   Context: ${msg.context_token.slice(0, 20)}...` : '';
+          return `📨 **${from}**\n   ${content}\n   _${time}_${contextInfo}`;
+        }).join('\n\n');
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `📬 ${response.msgs.length} new message(s):\n\n${formattedMessages}`,
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `❌ Receive error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          }],
+        };
+      }
+    }
+  );
+
+  // Send message via AI agent
+  server.tool(
+    'wechat_send_agent',
+    'Send a message through OpenClaw AI agent (message will be processed by AI)',
+    {
+      to: z.string().describe('Recipient ID'),
+      message: z.string().describe('Message content'),
     },
     async ({ to, message }) => {
       try {
-        const result = await client.sendMessage(to, message, true);
+        const result = await openclawClient.sendMessage(to, message, true);
 
         if (result.success) {
           return {
             content: [{
               type: 'text' as const,
-              text: `✅ Message sent to ${to}!\n\nResponse:\n${result.content?.slice(0, 500) || 'No response'}`,
+              text: `✅ Message sent via AI agent to ${to}!\n\nResponse:\n${result.content?.slice(0, 500) || 'No response'}`,
             }],
           };
         }
@@ -155,13 +279,22 @@ export function registerTools(
     {},
     async () => {
       try {
-        const status = await client.getStatus();
-        const channelStatus = await client.getChannelStatus();
+        const status = await openclawClient.getStatus();
+        const channelStatus = await openclawClient.getChannelStatus();
+
+        // Also show account info
+        let accountInfo = '';
+        try {
+          const accounts = WeixinApiClient.listAccounts();
+          accountInfo = `\n\n**Direct API Accounts**: ${accounts.length > 0 ? accounts.join(', ') : 'None'}`;
+        } catch {
+          accountInfo = '\n\n**Direct API Accounts**: Unable to load';
+        }
 
         return {
           content: [{
             type: 'text' as const,
-            text: `📊 **OpenClaw Status**\n\n${status}\n\n**Channel Status:**\n${channelStatus}`,
+            text: `📊 **OpenClaw Status**\n\n${status}\n\n**Channel Status:**\n${channelStatus}${accountInfo}`,
           }],
         };
       } catch (error) {
@@ -175,6 +308,41 @@ export function registerTools(
     }
   );
 
+  // List accounts
+  server.tool(
+    'wechat_accounts',
+    'List available WeChat accounts',
+    {},
+    async () => {
+      try {
+        const accounts = WeixinApiClient.listAccounts();
+
+        if (accounts.length === 0) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: '📋 No WeChat accounts found.\n\nPlease login first:\n```bash\nopenclaw channels login --channel openclaw-weixin\n```',
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `📋 **WeChat Accounts** (${accounts.length}):\n\n${accounts.map(a => `- ${a}`).join('\n')}`,
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `❌ List accounts error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          }],
+        };
+      }
+    }
+  );
+
   // Restart gateway
   server.tool(
     'wechat_restart',
@@ -182,9 +350,11 @@ export function registerTools(
     {},
     async () => {
       try {
-        const result = await client.restartGateway();
+        const result = await openclawClient.restartGateway();
 
         if (result.success) {
+          // Clear cached client after restart
+          weixinClient = null;
           return {
             content: [{
               type: 'text' as const,
@@ -210,31 +380,6 @@ export function registerTools(
     }
   );
 
-  // Open dashboard
-  server.tool(
-    'wechat_dashboard',
-    'Open the OpenClaw web dashboard in browser',
-    {},
-    async () => {
-      try {
-        await client.openDashboard();
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `🌐 Opening OpenClaw dashboard in your browser...\n\nURL: http://127.0.0.1:18789/`,
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `❌ Failed to open dashboard: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          }],
-        };
-      }
-    }
-  );
-
   // Help / guide
   server.tool(
     'wechat_help',
@@ -245,6 +390,19 @@ export function registerTools(
         content: [{
           type: 'text' as const,
           text: `📖 **cc-wechat-cli 使用指南**
+
+## 两种消息发送模式
+
+### 1. 直接 API 模式 (推荐)
+- \`wechat_send_direct\` - 直接通过 iLink API 发送
+- \`wechat_receive\` - 直接接收消息
+- 不经过 AI 处理，速度更快
+- 需要提供 context_token 来回复消息
+
+### 2. AI Agent 模式
+- \`wechat_send_agent\` - 通过 OpenClaw AI Agent 发送
+- 消息会被 AI 处理后回复
+- 适合智能对话场景
 
 ## 前置条件
 
@@ -271,20 +429,22 @@ export function registerTools(
 
 ## 可用工具
 
-| 工具 | 功能 |
-|------|------|
-| wechat_configure | 验证连接状态 |
-| wechat_login | 发起微信登录 |
-| wechat_send | 发送消息 |
-| wechat_status | 查看状态 |
-| wechat_restart | 重启网关 |
-| wechat_dashboard | 打开 Web 控制台 |
+| 工具 | 功能 | 模式 |
+|------|------|------|
+| wechat_configure | 验证连接状态 | - |
+| wechat_login | 发起微信登录 | - |
+| wechat_send_direct | 直接发送消息 | 直接 API |
+| wechat_receive | 接收消息 | 直接 API |
+| wechat_send_agent | AI 发送消息 | AI Agent |
+| wechat_status | 查看状态 | - |
+| wechat_accounts | 列出账号 | - |
+| wechat_restart | 重启网关 | - |
 
-## 注意事项
+## 使用流程
 
-- 消息通过 OpenClaw 的 AI Agent 发送
-- 收到的消息会由 AI 处理后回复
-- 如需直接收发消息，需要访问 OpenClaw 的 WebSocket API
+1. \`wechat_receive\` 接收消息
+2. 从消息中获取 \`from_user_id\` 和 \`context_token\`
+3. \`wechat_send_direct\` 发送回复
 
 ## 故障排除
 
