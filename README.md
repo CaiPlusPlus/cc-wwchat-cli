@@ -4,27 +4,60 @@
 
 让 Claude Code 通过微信收发消息的 MCP 服务器。
 
+## 工作原理
+
+```
+Claude Code (MCP Client)
+       ↓ MCP Protocol
+cc-wechat-cli (MCP Server)
+       ↓ CLI Commands
+OpenClaw Gateway
+       ↓ iLink Bot API
+微信 (WeChat)
+```
+
+**注意**: 本项目使用 OpenClaw CLI 命令进行集成。消息通过 OpenClaw 的 AI Agent 处理后发送。
+
 ## 功能特性
 
-- 📝 文本消息收发
-- 🖼️ 图片发送
-- 📁 文件发送
-- 👥 群聊支持
-- 📋 联系人管理
-- 🔄 多账号支持
+- ✅ 连接状态验证
+- ✅ 微信登录（二维码）
+- ✅ 消息发送（通过 AI Agent）
+- ✅ 网关状态查询
+- ✅ 网关重启
+- ✅ Web Dashboard
 
 ## 前置要求
 
-1. 安装 [Bun](https://bun.sh) 或 Node.js 20+
-2. 安装并运行 OpenClaw:
-   ```bash
-   npm install -g openclaw
-   npx @tencent-weixin/openclaw-weixin-cli install
-   ```
+### 1. 安装 OpenClaw
+
+```bash
+npm install -g openclaw
+```
+
+### 2. 安装微信插件
+
+```bash
+npx -y @tencent-weixin/openclaw-weixin-cli install
+```
+
+### 3. 登录微信
+
+```bash
+openclaw channels login --channel openclaw-weixin
+```
+
+扫描终端中的二维码登录微信。
+
+### 4. 启动网关
+
+```bash
+openclaw gateway start
+```
 
 ## 安装
 
-### Claude Code 配置
+### 在 Claude Code 中配置
 
 在你的 Claude Code 配置文件中添加:
 
@@ -33,7 +66,7 @@
   "mcpServers": {
     "wechat": {
       "command": "npx",
-      "args": ["-y", "cc-wechat-cli"]
+      "args": ["-y", "cc-wwchat-cli"]
     }
   }
 }
@@ -47,78 +80,60 @@ git clone https://github.com/CaiPlusPlus/cc-wwchat-cli
 cd cc-wwchat-cli
 
 # 安装依赖
-bun install
-
-# 开发模式
-bun run dev
+npm install
 
 # 构建
-bun run build
+npm run build
+
+# 运行
+node dist/index.js
 ```
 
-## 使用方法
+## 可用工具
 
-### 配置连接
-```
-/wechat:configure
-```
+| 工具 | 功能 |
+|------|------|
+| `wechat_configure` | 验证 OpenClaw + 微信连接状态 |
+| `wechat_login` | 发起微信登录（需要在终端执行） |
+| `wechat_send` | 发送消息到微信联系人 |
+| `wechat_status` | 查看网关和通道状态 |
+| `wechat_restart` | 重启 OpenClaw 网关 |
+| `wechat_dashboard` | 打开 Web 控制台 |
+| `wechat_help` | 显示使用指南 |
 
-### 登录微信
+## 使用示例
+
+### 验证连接
 ```
-/wechat:login
+/wechat_configure
 ```
 
 ### 发送消息
 ```
-/wechat:send --to "contact_id" --message "你好"
+/wechat_send --to "filehelper" --message "测试消息"
 ```
 
-### 接收消息
+### 查看状态
 ```
-/wechat:receive
-```
-
-### 发送图片
-```
-/wechat:send_image --to "contact_id" --image_path "/path/to/image.jpg"
-```
-
-### 发送文件
-```
-/wechat:send_file --to "contact_id" --file_path "/path/to/file.pdf"
-```
-
-### 列出联系人
-```
-/wechat:list_contacts
-```
-
-### 列出群组
-```
-/wechat:list_groups
-```
-
-## 架构
-
-```
-Claude Code (MCP Client)
-       ↓
-cc-wechat-cli (MCP Server)
-       ↓
-OpenClaw Gateway
-       ↓
-@tencent-weixin/openclaw-weixin
-       ↓
-微信
+/wechat_status
 ```
 
 ## 环境变量
 
 | 变量 | 描述 | 默认值 |
 |------|------|--------|
-| `OPENCLAW_HOST` | OpenClaw 主机 | `localhost` |
-| `OPENCLAW_PORT` | OpenClaw 端口 | `3100` |
-| `WECHAT_LOG_LEVEL` | 日志级别 | `info` |
+| `WECHAT_LOG_LEVEL` | 日志级别 (debug/info/warn/error) | `info` |
+
+## 技术栈
+
+- TypeScript
+- MCP SDK (@modelcontextprotocol/sdk)
+- OpenClaw CLI
+
+## 相关项目
+
+- [OpenClaw](https://github.com/openclaw/openclaw) - 多通道 AI 网关
+- [@tencent-weixin/openclaw-weixin](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin) - 腾讯官方微信插件
 
 ## 许可证
 
