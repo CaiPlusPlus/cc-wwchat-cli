@@ -100,7 +100,7 @@ export class WeixinApiClient {
    * Create client from OpenClaw stored credentials
    */
   static async fromOpenClawConfig(accountId?: string): Promise<WeixinApiClient> {
-    const stateDir = path.join(os.homedir(), '.openclaw', 'extensions', 'openclaw-weixin');
+    const stateDir = path.join(os.homedir(), '.openclaw', 'openclaw-weixin');
 
     // Read accounts index
     const accountsPath = path.join(stateDir, 'accounts.json');
@@ -289,7 +289,7 @@ export class WeixinApiClient {
    * List available accounts
    */
   static listAccounts(): string[] {
-    const stateDir = path.join(os.homedir(), '.openclaw', 'extensions', 'openclaw-weixin');
+    const stateDir = path.join(os.homedir(), '.openclaw', 'openclaw-weixin');
     const accountsPath = path.join(stateDir, 'accounts.json');
 
     if (!fs.existsSync(accountsPath)) {
